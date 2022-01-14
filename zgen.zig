@@ -16,13 +16,14 @@ fn extract(comptime T: type, comptime name: []const u8) std.builtin.TypeInfo.Str
 
 pub fn Generator(comptime sendT: type, comptime yieldT: type) type {
     return struct {
-        sendFn: fn(*@This(), sendT) error{StopIteration}!yieldT,
+        sendFn: fn(*@This(), sendT) ?yieldT,
+        finishedFn: fn(*@This()) bool,
 
-        pub inline fn send(self: *@This(), message: sendT) !yieldT {
+        pub inline fn send(self: *@This(), message: sendT) ?yieldT {
             return self.sendFn(self, message);
         }
 
-        pub inline fn next(self: *@This()) !yieldT {
+        pub inline fn next(self: *@This()) ?yieldT {
             if (sendT == void) {
                 return self.send({});
             } else if (@typeInfo(sendT) == .Optional) {
@@ -30,6 +31,10 @@ pub fn Generator(comptime sendT: type, comptime yieldT: type) type {
             } else {
                 @compileError("No suitable default value for type");
             }
+        }
+
+        pub inline fn finished(self: *@This()) bool {
+            return self.finishedFn(self);
         }
     };
 }
@@ -63,16 +68,19 @@ pub fn Coro(comptime f: anytype) type {
         callback: C = .{},
         frame: @Frame(f) = undefined,
         started: bool = false,
-        generator: Generator(sendT, yieldT) = .{.sendFn = send},
+        generator: Generator(sendT, yieldT) = .{
+            .sendFn = send,
+            .finishedFn = finished,
+        },
 
         pub fn init() @This() {
             return .{};
         }
 
-        pub fn send(gen: *Generator(sendT, yieldT), message: sendT) !yieldT {
+        pub fn send(gen: *Generator(sendT, yieldT), message: sendT) ?yieldT {
             const self = @fieldParentPtr(@This(), "generator", gen);
             if (self.callback.finished)
-                return error.StopIteration;
+                return null;
             self.callback.next_send = message;
             if (!self.started) {
                 self.started = true;
@@ -80,6 +88,11 @@ pub fn Coro(comptime f: anytype) type {
             }
             defer resume self.callback.frame;
             return self.callback.next_yield;
+        }
+
+        pub fn finished(gen: *Generator(sendT, yieldT)) bool {
+            const self = @fieldParentPtr(@This(), "generator", gen);
+            return self.callback.finished;
         }
     };
 }
@@ -95,7 +108,10 @@ pub fn RecursiveCoro(comptime f: anytype) type {
         frame: anyframe = undefined,
         started: bool = false,
         allocator: Allocator,
-        generator: Generator(sendT, yieldT) = .{.sendFn = send},
+        generator: Generator(sendT, yieldT) = .{
+            .sendFn = send,
+            .finishedFn = finished,
+        },
 
         pub fn init(allocator: Allocator) !@This() {
             return @This() {
@@ -108,10 +124,10 @@ pub fn RecursiveCoro(comptime f: anytype) type {
             self.allocator.destroy(pCast(*@Frame(f), self.frame));
         }
 
-        pub fn send(gen: *Generator(sendT, yieldT), message: sendT) !yieldT {
+        pub fn send(gen: *Generator(sendT, yieldT), message: sendT) ?yieldT {
             const self = @fieldParentPtr(@This(), "generator", gen);
             if (self.callback.finished)
-                return error.StopIteration;
+                return null;
             self.callback.next_send = message;
             if (!self.started) {
                 self.started = true;
@@ -120,6 +136,11 @@ pub fn RecursiveCoro(comptime f: anytype) type {
             }
             defer resume self.callback.frame;
             return self.callback.next_yield;
+        }
+
+        pub fn finished(gen: *Generator(sendT, yieldT)) bool {
+            const self = @fieldParentPtr(@This(), "generator", gen);
+            return self.callback.finished;
         }
     };
 }
@@ -136,7 +157,7 @@ test "ten coro" {
     var i: u8 = 0;
     while (iter.generator.send({})) |x| : (i += 1) {
         try expectEqual(i, x);
-    } else |err| {switch(err) {error.StopIteration => {}}}
+    }
     try expectEqual(i, 10);
 }
 
@@ -146,7 +167,7 @@ test "ten recursive coro" {
     var i: u8 = 0;
     while (iter.generator.next()) |x| : (i += 1) {
         try expectEqual(i, x);
-    } else |err| {switch(err) {error.StopIteration => {}}}
+    }
     try expectEqual(i, 10);
 }
 
@@ -170,23 +191,23 @@ fn triangular(c: *Callback(Data, ?u32)) void {
         return;
     };
     defer child.deinit();
-    _ = child.generator.send(.{.alloc=alloc}) catch unreachable;
-    _ = child.generator.send(.{.data=i-1}) catch unreachable;
+    _ = child.generator.send(.{.alloc=alloc});
+    _ = child.generator.send(.{.data=i-1});
     while (child.generator.send(.none)) |x| {
         _ = c.yield(i + x.?);
-    } else |err| {switch(err) {error.StopIteration => {}}}
+    }
 }
 
 test "triangular recursive coro" {
     std.debug.print("\n", .{});
     var iter = try RecursiveCoro(triangular).init(std.testing.allocator);
     defer iter.deinit();
-    _ = try iter.generator.send(.{.alloc = std.testing.allocator});
-    _ = try iter.generator.send(.{.data = 50});
+    _ = iter.generator.send(.{.alloc = std.testing.allocator});
+    _ = iter.generator.send(.{.data = 50});
     var i: u32 = 50;
     var total: u32 = 50;
     while (iter.generator.send(.none)) |x| : ({total += (i-1); i -= 1;}) {
         try expectEqual(total, x.?);
-    } else |err| {switch(err) {error.StopIteration => {}}}
+    }
     try expectEqual(total, 1275); // 1+2+..+49+50
 }

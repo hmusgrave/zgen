@@ -58,13 +58,11 @@ fn range(c: *gen.Callback(?RangeOptions, u32)) void {
 test "range" {
     std.debug.print("\n", .{});
     var iter = gen.Coro(range){};
-    _ = try iter.generator.send(RangeOptions{.end = 5});
+    _ = iter.generator.send(RangeOptions{.end = 5});
     while (iter.generator.next()) |x| {
         // prints 0, 1, 2, 3, 4
         std.debug.print("{}\n", .{x});
-    } else |err| {switch(err) {error.StopIteration => {}}}
-    // else |_| {} also works, but the compiler won't complain if you're able
-    // to yield error types and don't handle those
+    }
 }
 ```
 
