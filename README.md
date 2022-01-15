@@ -6,7 +6,8 @@ A simple generator library for zig
 
 Suspending execution of a function to yield intermediate results makes some
 algorithms drastically easier to write. This library automates most of the
-boilerplate for writing functions in that style.
+boilerplate for writing functions in that style. It supports self-referencing
+generators, making it suitable for tree and graph algorithms.
 
 ## Installation
 
@@ -63,6 +64,98 @@ test "range" {
         // prints 0, 1, 2, 3, 4
         std.debug.print("{}\n", .{x});
     }
+}
+```
+
+To support recursion (for-example, to build a tree-walking iterator), you need
+to break the dependency loop in your generator @Frame types referring to
+themselves. We do that by storing a pointer to the child frames and requiring
+an allocator to place that frame somewhere. Managing allocations is slightly
+more painful than not, so if you don't need recursive generators the simpler
+`Coro` interface is provided, but `RecursiveCoro` is strictly more powerful.
+
+```zig
+const std = @import("std");
+const gen = @import("zgen.zig");
+
+fn Node(comptime T: type) type {
+    return struct {
+        value: T,
+        left: ?*Node(T) = null,
+        right: ?*Node(T) = null,
+    };
+}
+
+const InorderData = union(enum) {
+    node: ?*Node(u32),
+    alloc: Allocator,
+};
+
+fn recursive_inorder(c: *gen.Callback(InorderData, ?u32)) void {
+    // Inorder tree traversal
+    defer c.close();
+    const allocator = c.yield(null).alloc;
+    var node = c.yield(null).node;
+    if (node) |n| {
+        // yield from left branch
+        {
+            var child = gen.RecursiveCoro(recursive_inorder).init(allocator) catch return;
+            defer child.deinit();
+            var g = &child.generator;
+            _ = g.send(.{.alloc = allocator});
+            _ = g.send(.{.node = n.left});
+            while (g.send(.{.node = null})) |x|
+                _ = c.yield(x);
+        }
+
+        // yield current value
+        _ = c.yield(n.value);
+
+        // yield from right branch
+        {
+            var child = gen.RecursiveCoro(recursive_inorder).init(allocator) catch return;
+            defer child.deinit();
+            var g = &child.generator;
+            _ = g.send(.{.alloc = allocator});
+            _ = g.send(.{.node = n.right});
+            while (g.send(.{.node = null})) |x|
+                _ = c.yield(x);
+        }
+    }
+}
+
+test "recursive inorder traversal" {
+    // The easiest way to support partial iteration without memory
+    // leaks is to wrap your favorite allocator with an arena.
+    // 
+    // Depending on the nature of your recursion it might be desirable
+    // to further wrap that with something like a dynamic circular buffer
+    // allocator or a stack-on-heap allocator.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var iter = try gen.RecursiveCoro(recursive_inorder).init(allocator);
+    defer iter.deinit();
+
+    var one = Node(u32){.value = 1};
+    var two = Node(u32){.value = 2};
+    var three = Node(u32){.value = 3};
+    var four = Node(u32){.value = 4};
+    two.left = &one;
+    two.right = &four;
+    four.left = &three;
+
+    // We built a small tree whose in-order traversal
+    // should be 1, 2, 3, 4. Verify that it is in fact
+    // 1, 2, 3, ..., N and that we stopped at N=4.
+    var g = &iter.generator;
+    _ = g.send(.{.alloc = allocator});
+    _ = g.send(.{.node = &two});
+    var i: u32 = 1;
+    while (g.send(.{.node = null})) |x| : (i += 1)
+        try expectEqual(x, i);
+    try expectEqual(i, 5);
 }
 ```
 
