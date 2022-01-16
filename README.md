@@ -86,40 +86,27 @@ fn Node(comptime T: type) type {
     };
 }
 
-const InorderData = union(enum) {
+const InorderData = struct {
     node: ?*Node(u32),
     alloc: Allocator,
 };
 
-fn recursive_inorder(c: *gen.Callback(InorderData, ?u32)) void {
+fn recursive_inorder(c: *gen.Callback(?InorderData, ?u32)) void {
     // Inorder tree traversal
     defer c.close();
-    const allocator = c.yield(null).alloc;
-    var node = c.yield(null).node;
-    if (node) |n| {
-        // yield from left branch
+    var data = c.yield(null) orelse return;
+    const allocator = data.alloc;
+    if (data.node) |n| {
         {
-            var child = gen.RecursiveCoro(recursive_inorder).init(allocator) catch return;
-            defer child.deinit();
-            var g = &child.generator;
-            _ = g.send(.{.alloc = allocator});
-            _ = g.send(.{.node = n.left});
-            while (g.send(.{.node = null})) |x|
-                _ = c.yield(x);
+            var child = (gen.RecursiveCoro(recursive_inorder).init(allocator) catch return)
+                .setup(.{.alloc = allocator, .node = n.left});
+            c.yield_from(&child.generator);
         }
-
-        // yield current value
         _ = c.yield(n.value);
-
-        // yield from right branch
         {
-            var child = gen.RecursiveCoro(recursive_inorder).init(allocator) catch return;
-            defer child.deinit();
-            var g = &child.generator;
-            _ = g.send(.{.alloc = allocator});
-            _ = g.send(.{.node = n.right});
-            while (g.send(.{.node = null})) |x|
-                _ = c.yield(x);
+            var child = (gen.RecursiveCoro(recursive_inorder).init(allocator) catch return)
+                .setup(.{.alloc = allocator, .node = n.right});
+            c.yield_from(&child.generator);
         }
     }
 }
@@ -135,9 +122,6 @@ test "recursive inorder traversal" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var iter = try gen.RecursiveCoro(recursive_inorder).init(allocator);
-    defer iter.deinit();
-
     var one = Node(u32){.value = 1};
     var two = Node(u32){.value = 2};
     var three = Node(u32){.value = 3};
@@ -146,14 +130,18 @@ test "recursive inorder traversal" {
     two.right = &four;
     four.left = &three;
 
+    var iter = (try RecursiveCoro(recursive_inorder).init(allocator)).setup(.{
+        .alloc = allocator,
+        .node = &two
+    });
+    defer iter.deinit();
+
     // We built a small tree whose in-order traversal
     // should be 1, 2, 3, 4. Verify that it is in fact
     // 1, 2, 3, ..., N and that we stopped at N=4.
     var g = &iter.generator;
-    _ = g.send(.{.alloc = allocator});
-    _ = g.send(.{.node = &two});
     var i: u32 = 1;
-    while (g.send(.{.node = null})) |x| : (i += 1)
+    while (g.next()) |x| : (i += 1)
         try expectEqual(x, i);
     try expectEqual(i, 5);
 }

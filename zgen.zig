@@ -52,6 +52,12 @@ pub fn Callback(comptime sendT: type, comptime yieldT: type) type {
             return self.next_send;
         }
 
+        pub fn yield_from(self: *@This(), gen: anytype) void {
+            // *Generator(optional|void, yieldT)
+            while (gen.next()) |x|
+                _ = self.yield(x);
+        }
+
         pub fn close(self: *@This()) void {
             self.finished = true;
         }
@@ -77,6 +83,11 @@ pub fn Coro(comptime f: anytype) type {
             return .{};
         }
 
+        pub fn setup(self: *@This(), initial_data: OptionalType(sendT)) *@This() {
+            _ = self.generator.send(initial_data);
+            return self;
+        }
+
         pub fn send(gen: *Generator(sendT, yieldT), message: sendT) ?yieldT {
             const self = @fieldParentPtr(@This(), "generator", gen);
             if (self.callback.finished)
@@ -97,6 +108,10 @@ pub fn Coro(comptime f: anytype) type {
             return self.callback.finished;
         }
     };
+}
+
+fn OptionalType(comptime T: type) type {
+    return @typeInfo(T).Optional.child;
 }
 
 pub fn RecursiveCoro(comptime f: anytype) type {
@@ -124,6 +139,11 @@ pub fn RecursiveCoro(comptime f: anytype) type {
 
         pub fn deinit(self: *@This()) void {
             self.allocator.destroy(pCast(*@Frame(f), self.frame));
+        }
+
+        pub fn setup(self: *@This(), initial_data: OptionalType(sendT)) *@This() {
+            _ = self.generator.send(initial_data);
+            return self;
         }
 
         pub fn send(gen: *Generator(sendT, yieldT), message: sendT) ?yieldT {
@@ -246,32 +266,26 @@ fn Node(comptime T: type) type {
     };
 }
 
-const InorderData = union(enum) {
+const InorderData = struct {
     node: ?*Node(u32),
     alloc: Allocator,
 };
 
-fn recursive_inorder(c: *Callback(InorderData, ?u32)) void {
+fn recursive_inorder(c: *Callback(?InorderData, ?u32)) void {
     defer c.close();
-    const allocator = c.yield(null).alloc;
-    var node = c.yield(null).node;
-    if (node) |n| {
+    var data = c.yield(null) orelse return;
+    const allocator = data.alloc;
+    if (data.node) |n| {
         {
-            var child = RecursiveCoro(recursive_inorder).init(allocator) catch return;
-            defer child.deinit();
-            _ = child.generator.send(.{.alloc = allocator});
-            _ = child.generator.send(.{.node = n.left});
-            while (child.generator.send(.{.node = null})) |x|
-                _ = c.yield(x);
+            var child = (RecursiveCoro(recursive_inorder).init(allocator) catch return)
+                .setup(.{.alloc = allocator, .node = n.left});
+            c.yield_from(&child.generator);
         }
         _ = c.yield(n.value);
         {
-            var child = RecursiveCoro(recursive_inorder).init(allocator) catch return;
-            defer child.deinit();
-            _ = child.generator.send(.{.alloc = allocator});
-            _ = child.generator.send(.{.node = n.right});
-            while (child.generator.send(.{.node = null})) |x|
-                _ = c.yield(x);
+            var child = (RecursiveCoro(recursive_inorder).init(allocator) catch return)
+                .setup(.{.alloc = allocator, .node = n.right});
+            c.yield_from(&child.generator);
         }
     }
 }
@@ -281,9 +295,6 @@ test "recursive inorder traversal" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var iter = try RecursiveCoro(recursive_inorder).init(allocator);
-    defer iter.deinit();
-
     var one = Node(u32){.value = 1};
     var two = Node(u32){.value = 2};
     var three = Node(u32){.value = 3};
@@ -292,11 +303,15 @@ test "recursive inorder traversal" {
     two.right = &four;
     four.left = &three;
 
+    var iter = (try RecursiveCoro(recursive_inorder).init(allocator)).setup(.{
+        .alloc = allocator,
+        .node = &two
+    });
+    defer iter.deinit();
+
     var g = &iter.generator;
-    _ = g.send(.{.alloc = allocator});
-    _ = g.send(.{.node = &two});
     var i: u32 = 1;
-    while (g.send(.{.node = null})) |x| : (i += 1)
+    while (g.next()) |x| : (i += 1)
         try expectEqual(x, i);
     try expectEqual(i, 5);
 }
