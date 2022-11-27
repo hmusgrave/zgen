@@ -6,7 +6,7 @@ inline fn pCast(comptime T: type, p: anytype) T {
     return @intToPtr(T, @ptrToInt(p));
 }
 
-fn extract(comptime T: type, comptime name: []const u8) std.builtin.TypeInfo.StructField {
+fn extract(comptime T: type, comptime name: []const u8) std.builtin.Type.StructField {
     inline for (@typeInfo(T).Struct.fields) |f| {
         if (std.mem.eql(u8, f.name, name))
             return f;
@@ -16,8 +16,8 @@ fn extract(comptime T: type, comptime name: []const u8) std.builtin.TypeInfo.Str
 
 pub fn Generator(comptime sendT: type, comptime yieldT: type) type {
     return struct {
-        sendFn: fn(*@This(), sendT) ?yieldT,
-        finishedFn: fn(*@This()) bool,
+        sendFn: fn (*@This(), sendT) ?yieldT,
+        finishedFn: fn (*@This()) bool,
 
         pub inline fn send(self: *@This(), message: sendT) ?yieldT {
             return self.sendFn(self, message);
@@ -48,7 +48,9 @@ pub fn Callback(comptime sendT: type, comptime yieldT: type) type {
 
         pub fn yield(self: *@This(), x: yieldT) sendT {
             self.next_yield = x;
-            suspend { self.frame = @frame(); }
+            suspend {
+                self.frame = @frame();
+            }
             return self.next_send;
         }
 
@@ -131,7 +133,7 @@ pub fn RecursiveCoro(comptime f: anytype) type {
         },
 
         pub fn init(allocator: Allocator) !@This() {
-            return @This() {
+            return @This(){
                 .allocator = allocator,
                 .frame = try allocator.create(@Frame(f)),
             };
@@ -215,8 +217,8 @@ fn triangular(c: *Callback(Data, ?u32)) void {
         return;
     };
     defer child.deinit();
-    _ = child.generator.send(.{.alloc=alloc});
-    _ = child.generator.send(.{.data=i-1});
+    _ = child.generator.send(.{ .alloc = alloc });
+    _ = child.generator.send(.{ .data = i - 1 });
     while (child.generator.send(.none)) |x| {
         _ = c.yield(i + x.?);
     }
@@ -225,11 +227,14 @@ fn triangular(c: *Callback(Data, ?u32)) void {
 test "triangular recursive coro" {
     var iter = try RecursiveCoro(triangular).init(std.testing.allocator);
     defer iter.deinit();
-    _ = iter.generator.send(.{.alloc = std.testing.allocator});
-    _ = iter.generator.send(.{.data = 50});
+    _ = iter.generator.send(.{ .alloc = std.testing.allocator });
+    _ = iter.generator.send(.{ .data = 50 });
     var i: u32 = 50;
     var total: u32 = 50;
-    while (iter.generator.send(.none)) |x| : ({total += (i-1); i -= 1;}) {
+    while (iter.generator.send(.none)) |x| : ({
+        total += (i - 1);
+        i -= 1;
+    }) {
         try expectEqual(total, x.?);
     }
     try expectEqual(total, 1275); // 1+2+..+49+50
@@ -245,7 +250,9 @@ test "simple_recurse" {
     // Exercises the "no-yield" code path for RecursiveCoro
     var iter = try RecursiveCoro(simple_recurse).init(std.testing.allocator);
     defer iter.deinit();
-    while (iter.generator.next()) |_| { unreachable; }
+    while (iter.generator.next()) |_| {
+        unreachable;
+    }
 }
 
 fn noop_generator(c: *Callback(void, void)) void {
@@ -255,7 +262,9 @@ fn noop_generator(c: *Callback(void, void)) void {
 test "noop_generator" {
     // Exercises the "no-yield" code path for Coro
     var iter = Coro(noop_generator).init();
-    while (iter.generator.next()) |_| { unreachable; }
+    while (iter.generator.next()) |_| {
+        unreachable;
+    }
 }
 
 fn Node(comptime T: type) type {
@@ -278,13 +287,13 @@ fn recursive_inorder(c: *Callback(?InorderData, ?u32)) void {
     if (data.node) |n| {
         {
             var child = (RecursiveCoro(recursive_inorder).init(allocator) catch return)
-                .setup(.{.alloc = allocator, .node = n.left});
+                .setup(.{ .alloc = allocator, .node = n.left });
             c.yield_from(&child.generator);
         }
         _ = c.yield(n.value);
         {
             var child = (RecursiveCoro(recursive_inorder).init(allocator) catch return)
-                .setup(.{.alloc = allocator, .node = n.right});
+                .setup(.{ .alloc = allocator, .node = n.right });
             c.yield_from(&child.generator);
         }
     }
@@ -295,18 +304,15 @@ test "recursive inorder traversal" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var one = Node(u32){.value = 1};
-    var two = Node(u32){.value = 2};
-    var three = Node(u32){.value = 3};
-    var four = Node(u32){.value = 4};
+    var one = Node(u32){ .value = 1 };
+    var two = Node(u32){ .value = 2 };
+    var three = Node(u32){ .value = 3 };
+    var four = Node(u32){ .value = 4 };
     two.left = &one;
     two.right = &four;
     four.left = &three;
 
-    var iter = (try RecursiveCoro(recursive_inorder).init(allocator)).setup(.{
-        .alloc = allocator,
-        .node = &two
-    });
+    var iter = (try RecursiveCoro(recursive_inorder).init(allocator)).setup(.{ .alloc = allocator, .node = &two });
     defer iter.deinit();
 
     var g = &iter.generator;
