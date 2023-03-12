@@ -1,4 +1,4 @@
-# zgen
+# zgen (broken till Zig 0.11 is released and we update our async stuff)
 
 A simple generator library for zig
 
